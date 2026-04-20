@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Memory Quest</title>
+<script src="https://cdn.jsdelivr.net/npm/canvas-confetti@1.6.0/dist/confetti.browser.min.js"></script>
+
+<style>
+body {
+  margin: 0;
+  font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+  background: linear-gradient(135deg, #1e3c72, #2a5298);
+  color: white;
+  overflow-x: hidden;
+}
+
+.screen { display: none; min-height: 100vh; padding: 20px; box-sizing: border-box; text-align: center; }
+.active { display: flex; flex-direction: column; justify-content: center; align-items: center; animation: fadeIn 0.4s ease-out; }
+
+@keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+
+.flash { animation: flash-anim 0.5s ease; }
+@keyframes flash-anim {
+  50% { transform: scale(1.2); color: #ffeb3b; text-shadow: 0 0 10px #ffeb3b; }
+}
+
+button {
+  background: linear-gradient(135deg, #ff512f, #f09819);
+  color: white; border: none; padding: 14px 28px; margin: 8px;
+  border-radius: 50px; font-size: 18px; font-weight: bold; cursor: pointer;
+  box-shadow: 0 4px 15px rgba(0,0,0,0.3); transition: 0.2s;
+}
+
+button:hover:not(:disabled) { transform: translateY(-3px); }
+button:disabled { background: #555; cursor: not-allowed; opacity: 0.6; box-shadow: none; }
+
+/* LEVEL GRID */
+.level-grid {
+  display: grid;
+  grid-template-columns: repeat(5, 1fr);
+  gap: 10px;
+  max-width: 400px;
+  margin-top: 20px;
+}
+
+.lvl-btn {
+  width: 60px; height: 60px; padding: 0; border-radius: 12px; font-size: 16px;
+}
+
+.topbar {
+  width: 90%; max-width: 400px; display: flex; justify-content: space-between;
+  padding: 15px; background: rgba(255,255,255,0.1); border-radius: 15px; margin-bottom: 20px;
+}
+
+#game { display: grid; gap: 8px; perspective: 1000px; }
+
+.card {
+  width: 65px; height: 65px; background: #2c3e50; border: 2px solid rgba(255,255,255,0.2);
+  border-radius: 10px; display: flex; align-items: center; justify-content: center;
+  font-size: 28px; cursor: pointer; transition: 0.4s; transform-style: preserve-3d;
+}
+
+.card.flipped { transform: rotateY(180deg); background: white; }
+</style>
+</head>
+
+<body>
+
+<div id="splash" class="screen active"><h1>🧠 MEMORY QUEST 🧠 </h1></div>
+
+<div id="home" class="screen">
+  <h1>Memory Quest</h1>
+  <img src="/pics/file_0000000050e471fa964ae6442c5aa774.png" style="width:180px;border-radius:12px;margin-bottom:10px;">
+  <p>Train your brain with this classic challenge!</p>
+  <button onclick="showDifficulty()">▶ Start Quest</button>
+</div>
+
+<div id="difficulty" class="screen">
+  <h2>Select Difficulty</h2>
+  <button onclick="showLevelSelect('easy')">Easy</button>
+  <button onclick="showLevelSelect('medium')">Medium</button>
+  <button onclick="showLevelSelect('hard')">Hard</button>
+  <button style="background: #444" onclick="showHome()">Back</button>
+</div>
+
+<div id="levelSelect" class="screen">
+  <h2 id="modeTitle">EASY</h2>
+  <div class="level-grid" id="lvlContainer"></div>
+  <button style="background: #444; margin-top:20px;" onclick="showDifficulty()">Back</button>
+</div>
+
+<div id="gameScreen" class="screen">
+  <div class="topbar">
+    <div id="movesLabel">Moves: <span id="moves">0</span></div>
+    <div id="lvlDisplay" style="font-weight: bold; color: #f09819;"></div>
+  </div>
+  <div id="game"></div>
+</div>
+
+<div id="winScreen" class="screen">
+  <h1 class="flash">🏆 LEVEL COMPLETE!</h1>
+  <p id="winText" style="font-size: 20px;"></p>
+  <button onclick="nextLevel()">Next Level</button>
+  <button style="background: #555" onclick="showDifficulty()">World Map</button>
+</div>
+
+<script>
+const emojis = ["🍎","🍌","🍇","🍓","🍒","🍉","🥝","🍍","🍋","🍑","🍏","🥥"];
+let first = null, second = null, lock = false;
+let moves = 0, matched = 0, currentDifficulty = "", currentLevel = 1;
+let rows = 4, cols = 4;
+
+// --- SOUND ENGINE ---
+const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+function playSound(freq, type, duration) {
+    const osc = audioCtx.createOscillator();
+    const gain = audioCtx.createGain();
+    osc.type = type;
+    osc.frequency.setValueAtTime(freq, audioCtx.currentTime);
+    gain.gain.setValueAtTime(0.05, audioCtx.currentTime);
+    gain.gain.exponentialRampToValueAtTime(0.01, audioCtx.currentTime + duration);
+    osc.connect(gain); gain.connect(audioCtx.destination);
+    osc.start(); osc.stop(audioCtx.currentTime + duration);
+}
+
+const sounds = {
+    flip: () => playSound(400, 'sine', 0.1),
+    match: () => { playSound(600, 'sine', 0.1); setTimeout(() => playSound(800, 'sine', 0.2), 100); },
+    fail: () => playSound(200, 'triangle', 0.2),
+    win: () => { [440, 554, 659, 880].forEach((f, i) => setTimeout(() => playSound(f, 'square', 0.2), i * 150)); }
+};
+
+/* LEVEL MANAGEMENT */
+function getProgress(diff) { return parseInt(localStorage.getItem('prog_' + diff)) || 1; }
+function saveProgress(diff, lvl) { 
+    if (lvl >= getProgress(diff)) localStorage.setItem('prog_' + diff, lvl + 1); 
+}
+
+function show(id){
+  document.querySelectorAll(".screen").forEach(s => s.classList.remove("active"));
+  document.getElementById(id).classList.add("active");
+}
+
+function showHome(){ show("home"); }
+function showDifficulty(){ show("difficulty"); }
+
+setTimeout(() => showHome(), 1500);
+
+function showLevelSelect(diff) {
+    currentDifficulty = diff;
+    document.getElementById("modeTitle").innerText = diff.toUpperCase() + " QUEST";
+    const container = document.getElementById("lvlContainer");
+    container.innerHTML = "";
+    
+    let reached = getProgress(diff);
+
+    for (let i = 1; i <= 20; i++) {
+        let btn = document.createElement("button");
+        btn.innerText = i;
+        btn.className = "lvl-btn";
+        if (i > reached) btn.disabled = true;
+        btn.onclick = () => startGame(diff, i);
+        container.appendChild(btn);
+    }
+    show("levelSelect");
+}
+
+function startGame(diff, lvl) {
+    currentDifficulty = diff;
+    currentLevel = lvl;
+    if(diff === "easy"){ rows = 4; cols = 4; }
+    else if(diff === "medium"){ rows = 5; cols = 4; }
+    else { rows = 6; cols = 4; }
+    
+    setup();
+    show("gameScreen");
+}
+
+function setup(){
+  moves = 0; matched = 0;
+  document.getElementById("moves").innerText = moves;
+  document.getElementById("lvlDisplay").innerText = `${currentDifficulty.toUpperCase()} - LVL ${currentLevel}`;
+  
+  let pairs = (rows * cols) / 2;
+  let cards = [...emojis, ...emojis].slice(0, pairs * 2); 
+  // For hard mode (24 cards), we need 12 pairs. emojis has 12, so it fits perfectly.
+  
+  let gameCards = cards.slice(0, pairs);
+  gameCards = [...gameCards, ...gameCards];
+  shuffle(gameCards);
+
+  const game = document.getElementById("game");
+  game.innerHTML = "";
+  game.style.gridTemplateColumns = `repeat(${cols}, 65px)`;
+
+  gameCards.forEach(e => {
+    let c = document.createElement("div");
+    c.className = "card";
+    c.dataset.emoji = e;
+    c.innerHTML = `<div style="visibility:hidden">${e}</div>`;
+    c.onclick = flip;
+    game.appendChild(c);
+  });
+}
+
+function shuffle(a){
+  for(let i=a.length-1; i>0; i--){
+    let j = Math.floor(Math.random()*(i+1));
+    [a[i],a[j]] = [a[j],a[i]];
+  }
+}
+
+function flip(){
+  if(lock || this === first || this.classList.contains("flipped")) return;
+  sounds.flip();
+  this.classList.add("flipped");
+  this.firstChild.style.visibility = "visible";
+
+  if(!first){ first = this; return; }
+  second = this;
+  moves++;
+  document.getElementById("moves").innerText = moves;
+  document.getElementById("movesLabel").classList.add("flash");
+  setTimeout(() => document.getElementById("movesLabel").classList.remove("flash"), 500);
+  check();
+}
+
+function check(){
+  if(first.dataset.emoji === second.dataset.emoji){
+    matched++;
+    sounds.match();
+    reset();
+    if(matched === (rows * cols) / 2) triggerWin();
+  } else {
+    lock = true;
+    setTimeout(() => {
+      first.classList.remove("flipped");
+      second.classList.remove("flipped");
+      first.firstChild.style.visibility = "hidden";
+      second.firstChild.style.visibility = "hidden";
+      sounds.fail();
+      reset();
+    }, 700);
+  }
+}
+
+function reset(){ [first, second, lock] = [null, null, false]; }
+
+function triggerWin(){
+  saveProgress(currentDifficulty, currentLevel);
+  sounds.win();
+  confetti({ particleCount: 150, spread: 70, origin: { y: 0.6 } });
+
+  setTimeout(() => {
+    document.getElementById("winText").innerText = `Level ${currentLevel} cleared in ${moves} moves!`;
+    show("winScreen");
+  }, 800);
+}
+
+function nextLevel(){
+  if (currentLevel < 20) {
+      startGame(currentDifficulty, currentLevel + 1);
+  } else {
+      showDifficulty();
+  }
+}
+</script>
+</body>
+</html>
